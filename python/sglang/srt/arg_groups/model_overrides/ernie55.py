@@ -35,8 +35,11 @@ logger = logging.getLogger(__name__)
 # and the memory budget follows the same choice, so no other KV dtype is servable.
 _SUPPORTED_KV_CACHE_DTYPES = ("auto", "fp8_e4m3", "bfloat16")
 
-# DSpark with DP attention is validated on DeepEP here; MegaMoE is rejected below.
-register_dspark_dp_a2a_backends(ERNIE5_5_MOE_ARCH, ("none", "deepep"))
+# DSpark with DP attention is validated on DeepEP and MegaMoE here.
+register_dspark_dp_a2a_backends(ERNIE5_5_MOE_ARCH, ("none", "deepep", "megamoe"))
+
+# The MegaMoE SiTU kernel bakes these two constants.
+_MEGAMOE_SITU_CONSTANTS = (4.0, 25.0)
 
 
 def _validate_features(cfg: Any) -> None:
@@ -71,12 +74,6 @@ def _validate_features(cfg: Any) -> None:
     if cfg.enable_hisparse:
         # HiSparse knows the compressed-KV sub-pools, not the MLA layers' latent one.
         raise ValueError("ERNIE 5.5 Flash does not support --enable-hisparse")
-    if cfg.moe_a2a_backend == "megamoe":
-        # The MegaMoE kernel hardcodes SwiGLU; these experts use SiTU.
-        raise ValueError(
-            "ERNIE 5.5 Flash does not support --moe-a2a-backend megamoe; "
-            "use deepep or none"
-        )
     for flag, value in (
         ("--dsa-prefill-backend", cfg.dsa_prefill_backend),
         ("--dsa-decode-backend", cfg.dsa_decode_backend),
@@ -139,10 +136,22 @@ def _validate_speculative(cfg: Any) -> None:
         )
 
 
+def _validate_megamoe(cfg: Any, hf_config: Any) -> None:
+    if cfg.moe_a2a_backend != "megamoe":
+        return
+    constants = (hf_config.activation_situ_beta, hf_config.activation_situ_linear_beta)
+    if constants != _MEGAMOE_SITU_CONSTANTS:
+        raise ValueError(
+            "ERNIE 5.5 Flash with --moe-a2a-backend megamoe needs SiTU constants "
+            f"{_MEGAMOE_SITU_CONSTANTS}, the checkpoint has {constants}"
+        )
+
+
 @_register_for(ERNIE5_5_MOE_ARCH)
 def _ernie55_overrides(server_args: Any, hf_config: Any) -> dict:
     cfg = resolving_view(server_args)
     _validate_features(cfg)
+    _validate_megamoe(cfg, hf_config)
     _validate_speculative(cfg)
     overrides: Dict[str, Any] = {
         "attention_backend": "ernie55",
